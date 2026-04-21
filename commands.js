@@ -75,7 +75,23 @@ const commands = [
     .addSubcommand(sub =>
       sub
         .setName('historial')
-        .setDescription('Muestra los últimos torneos finalizados')),
+        .setDescription('Muestra los últimos torneos finalizados'))
+
+    // ─────────────────────────────────────────
+    // /torneo descalificar
+    // ─────────────────────────────────────────
+    .addSubcommand(sub =>
+      sub
+        .setName('descalificar')
+        .setDescription('Descalifica a un jugador del torneo (solo el admin)')
+        .addUserOption(opt =>
+          opt.setName('jugador')
+            .setDescription('Jugador a descalificar')
+            .setRequired(true))
+        .addStringOption(opt =>
+          opt.setName('razon')
+            .setDescription('Razón de la descalificación (opcional)')
+            .setRequired(false))),
 
 ].map(cmd => cmd.toJSON());
 

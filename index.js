@@ -177,6 +177,31 @@ async function manejarComando(interaction) {
       content: `🚀 ${menciones}\n¡**${t.nombre}** ha comenzado! Creando canales de partida...`,
     });
 
+    // Enviar DM a cada jugador notificando el inicio
+    for (const jugador of t.jugadores) {
+      try {
+        const miembro = await guild.members.fetch(jugador.id);
+        await miembro.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`🏆 ¡El torneo **${t.nombre}** ha comenzado!`)
+              .setColor(COLORES.oro)
+              .setDescription(
+                `¡Hola **${jugador.displayName}**! El torneo en el que estás inscrito acaba de iniciar.\n\n` +
+                `> 🎮 **Juego:** ${t.juego}\n` +
+                `> ⚔️ **Tipo:** ${t.tipo}\n` +
+                `> 👥 **Jugadores:** ${t.jugadores.length}\n\n` +
+                `Revisa el servidor — se creó un canal privado para tu primera partida.`
+              )
+              .setFooter({ text: `¡Mucha suerte! 🍀` })
+              .setTimestamp(),
+          ],
+        });
+      } catch {
+        // El usuario tiene DMs desactivados, ignorar silenciosamente
+      }
+    }
+
     await interaction.followUp({ embeds: [embedBrackets(t)] });
 
     // ✨ Crear categoría + canales
@@ -250,6 +275,141 @@ async function manejarComando(interaction) {
           .setTimestamp(),
       ],
       ephemeral: true,
+    });
+  }
+
+  // ── /torneo descalificar ───────────────
+  if (sub === 'descalificar') {
+    const torneo = manager.obtenerTorneo(interaction.channelId);
+    if (!torneo) return interaction.reply({ content: '❌ No hay torneo activo en este canal.', ephemeral: true });
+    if (torneo.adminId !== interaction.user.id) return interaction.reply({ content: '❌ Solo el creador del torneo puede descalificar jugadores.', ephemeral: true });
+
+    const usuarioTarget = interaction.options.getUser('jugador');
+    const razon = interaction.options.getString('razon') || 'Sin razón especificada';
+
+    // Verificar que el jugador está en el torneo
+    const jugadorIdx = torneo.jugadores.findIndex(j => j.id === usuarioTarget.id);
+    if (jugadorIdx === -1) return interaction.reply({ content: `❌ **${usuarioTarget.displayName || usuarioTarget.username}** no está inscrito en el torneo.`, ephemeral: true });
+
+    const jugador = torneo.jugadores[jugadorIdx];
+
+    if (torneo.estado === 'registro') {
+      // Si el torneo no ha iniciado, simplemente eliminar al jugador
+      torneo.jugadores.splice(jugadorIdx, 1);
+
+      // Intentar DM al descalificado
+      try {
+        const miembro = await interaction.guild.members.fetch(usuarioTarget.id);
+        await miembro.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`🚫 Fuiste descalificado del torneo **${torneo.nombre}**`)
+              .setColor(COLORES.rojo)
+              .setDescription(`**Razón:** ${razon}`)
+              .setTimestamp(),
+          ],
+        });
+      } catch {}
+
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('🚫 Jugador Descalificado')
+            .setColor(COLORES.rojo)
+            .setDescription(`**${jugador.displayName}** fue descalificado del torneo.\n**Razón:** ${razon}`)
+            .setTimestamp(),
+        ],
+      });
+    }
+
+    // Si el torneo ya inició: marcar sus partidas activas como walkover (el rival gana automáticamente)
+    let partidasAfectadas = 0;
+    for (const partida of torneo.partidas) {
+      if (partida.terminada) continue;
+      const esJ1 = partida.jugador1?.id === usuarioTarget.id;
+      const esJ2 = partida.jugador2?.id === usuarioTarget.id;
+      if (!esJ1 && !esJ2) continue;
+
+      // El rival gana por walkover
+      const ganadorWO = esJ1 ? partida.jugador2 : partida.jugador1;
+      if (!ganadorWO) continue;
+
+      const resultado = manager.reportarGanador(torneo.channelId, partida.id, ganadorWO.id);
+      partidasAfectadas++;
+
+      // Notificar en el canal de la partida si existe
+      const canalPartidaId = torneo.canalesPartida?.[partida.id];
+      if (canalPartidaId) {
+        try {
+          const canalPartida = await interaction.guild.channels.fetch(canalPartidaId);
+          await canalPartida.send({
+            embeds: [
+              new EmbedBuilder()
+                .setTitle('🚫 Walkover — Jugador Descalificado')
+                .setColor(COLORES.rojo)
+                .setDescription(
+                  `**${jugador.displayName}** fue descalificado.\n` +
+                  `**${ganadorWO.displayName}** avanza automáticamente.\n` +
+                  `**Razón:** ${razon}`
+                )
+                .setTimestamp(),
+            ],
+          });
+          setTimeout(() => chanManager.eliminarCanal(interaction.guild, canalPartidaId), 5000);
+        } catch {}
+      }
+
+      // Procesar posibles cambios de ronda / fin de torneo
+      if (resultado.torneoTerminado) {
+        const menciones = resultado.torneo.jugadores.map(j => `<@${j.id}>`).join(' ');
+        const canalPrincipal = await interaction.guild.channels.fetch(torneo.channelId).catch(() => null);
+        if (canalPrincipal) {
+          await canalPrincipal.send({ content: menciones, embeds: [embedGanador(resultado.torneo)] });
+        }
+        if (torneo.categoriaId) {
+          setTimeout(() => chanManager.eliminarCategoria(interaction.guild, torneo.categoriaId), 10_000);
+        }
+      } else if (resultado.nuevaRonda) {
+        const canalPrincipal = await interaction.guild.channels.fetch(torneo.channelId).catch(() => null);
+        if (canalPrincipal) {
+          await avanzarRonda(interaction.guild, resultado.torneo, canalPrincipal, ganadorWO.displayName, partida.id);
+        }
+      } else {
+        const canalPrincipal = await interaction.guild.channels.fetch(torneo.channelId).catch(() => null);
+        if (canalPrincipal) {
+          await canalPrincipal.send({
+            content: `✅ **${ganadorWO.displayName}** avanza por walkover (partida **${partida.id}**). Esperando los demás resultados...`,
+          });
+        }
+      }
+    }
+
+    // Intentar DM al descalificado
+    try {
+      const miembro = await interaction.guild.members.fetch(usuarioTarget.id);
+      await miembro.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(`🚫 Fuiste descalificado del torneo **${torneo.nombre}**`)
+            .setColor(COLORES.rojo)
+            .setDescription(`**Razón:** ${razon}`)
+            .setTimestamp(),
+        ],
+      });
+    } catch {}
+
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('🚫 Jugador Descalificado')
+          .setColor(COLORES.rojo)
+          .setDescription(
+            `**${jugador.displayName}** fue descalificado del torneo.\n` +
+            `**Razón:** ${razon}\n` +
+            (partidasAfectadas > 0 ? `\n✅ ${partidasAfectadas} partida(s) resuelta(s) por walkover.` : '')
+          )
+          .setTimestamp(),
+      ],
     });
   }
 }
